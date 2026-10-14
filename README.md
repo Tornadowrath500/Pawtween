@@ -3,7 +3,7 @@
 A small, friendly animation tool for creating motion graphics, stickers and overlays.
 
 - **Web version (free):** https://Tornadowrath500.github.io/Pawtween/
-- **Desktop version (pay what you want):** https://tornadowrath500.itch.io/pawtween
+- **Desktop version (early access only) (pay what you want):** https://tornadowrath500.itch.io/pawtween
   Adds FFmpeg export (H.265, ProRes 4444 with transparency, APNG, PNG sequence), hardware encoding, a render queue, batch export and a projects library.
 
 ## About AI
