@@ -30,8 +30,11 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: |
           curl -L -o f.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
-          tar -xf f.tar.xz --wildcards '*/bin/ffmpeg' --strip-components=2 -C src-tauri/binaries
+          mkdir -p temp_ffmpeg
+          tar -xf f.tar.xz -C temp_ffmpeg --strip-components=1
+          cp temp_ffmpeg/bin/ffmpeg src-tauri/binaries/
           chmod +x src-tauri/binaries/ffmpeg
+          rm -rf temp_ffmpeg f.tar.xz
       - name: Include license files
         shell: bash
         run: cp LICENSE ART-LICENSE THIRD-PARTY.md src-tauri/binaries/
