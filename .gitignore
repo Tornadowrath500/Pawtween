@@ -1,0 +1,9 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/icons/
+src-tauri/binaries/ffmpeg*
+*.key
+*.key.pub
+.env
+.DS_Store

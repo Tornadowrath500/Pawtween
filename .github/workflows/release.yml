@@ -1,0 +1,46 @@
+name: release
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+      - if: matrix.os == 'ubuntu-22.04'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev
+      - name: Get FFmpeg (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          curl -L -o f.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+          unzip -j f.zip '*/bin/ffmpeg.exe' -d src-tauri/binaries
+      - name: Get FFmpeg (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          curl -L -o f.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          tar -xf f.tar.xz --wildcards '*/bin/ffmpeg' --strip-components=2 -C src-tauri/binaries
+          chmod +x src-tauri/binaries/ffmpeg
+      - name: Include license files
+        shell: bash
+        run: cp LICENSE ART-LICENSE THIRD-PARTY.md src-tauri/binaries/
+      - run: npm install
+      - run: npx tauri icon app-icon.png
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: 'v__VERSION__'
+          releaseName: 'Pawtween v__VERSION__'
+          releaseDraft: true
+          includeUpdaterJson: true
