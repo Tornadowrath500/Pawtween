@@ -17,6 +17,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - if: matrix.os == 'ubuntu-22.04'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev
+      - name: Create binaries directory
+        shell: bash
+        run: mkdir -p src-tauri/binaries
       - name: Get FFmpeg (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
