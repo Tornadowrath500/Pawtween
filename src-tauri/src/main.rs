@@ -35,14 +35,50 @@ fn new_cmd(app: &tauri::AppHandle, low: bool) -> Command {
 }
 
 /// One running FFmpeg process that frames are streamed into. Several can run at once (editor export + render queue).
+/// `child` and `stdin` have their own locks: a frame write that is blocked on a stalled FFmpeg only holds `stdin`,
+/// so cancelling (which needs `child`) always works, and one job can never block another job.
 struct Enc {
-    child: Child,
-    stdin: Option<ChildStdin>,
+    child: Mutex<Child>,
+    stdin: Mutex<Option<ChildStdin>>,
     err: Arc<Mutex<String>>,
     out: String,
 }
 #[derive(Default)]
-struct EncState(Mutex<HashMap<String, Enc>>);
+struct EncState(Mutex<HashMap<String, Arc<Enc>>>);
+
+/// Stops an encoder. Killing FFmpeg also makes any blocked frame write fail, which frees its lock.
+fn kill_enc(e: &Enc) {
+    if let Ok(mut c) = e.child.lock() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    if let Ok(mut s) = e.stdin.try_lock() {
+        drop(s.take());
+    }
+}
+
+/// Runs a command to completion but gives up (and kills it) after `secs`. Returns true only on a clean exit.
+fn run_with_timeout(mut c: Command, secs: u64) -> bool {
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(_) => return false,
+    };
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(s)) => return s.success(),
+            Ok(None) => {
+                if start.elapsed() > std::time::Duration::from_secs(secs) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => return false,
+        }
+    }
+}
 #[derive(Default)]
 struct OpenFile(Mutex<Option<String>>);
 
@@ -53,9 +89,8 @@ fn probe_hw(app: tauri::AppHandle) -> String {
         let mut c = new_cmd(&app, false);
         c.args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2", "-c:v", enc, "-f", "null", "-"]);
         c.stdout(Stdio::null()).stderr(Stdio::null());
-        if let Ok(s) = c.status() {
-            if s.success() { return enc.to_string(); }
-        }
+        // a driver that hangs while starting a hardware encoder must not hang the app
+        if run_with_timeout(c, 12) { return enc.to_string(); }
     }
     String::new()
 }
@@ -64,7 +99,7 @@ fn probe_hw(app: tauri::AppHandle) -> String {
 fn enc_start(app: tauri::AppHandle, state: State<'_, EncState>, id: String, fps: f64, w: u32, h: u32, out: String,
              audio: Option<String>, fmt: String, crf: u32, hw: Option<String>, threads: Option<u32>, low: Option<bool>) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(mut old) = guard.remove(&id) { let _ = old.child.kill(); }
+    if let Some(old) = guard.remove(&id) { kill_enc(&old); }
     let audio = if matches!(fmt.as_str(), "gif" | "apng" | "seq") { None } else { audio };
     let size = format!("{}x{}", w, h);
     let fps_s = fps.to_string();
@@ -128,7 +163,7 @@ fn enc_start(app: tauri::AppHandle, state: State<'_, EncState>, id: String, fps:
             }
         });
     }
-    guard.insert(id, Enc { child, stdin, err, out });
+    guard.insert(id, Arc::new(Enc { child: Mutex::new(child), stdin: Mutex::new(stdin), err, out }));
     Ok(())
 }
 
@@ -140,11 +175,16 @@ fn enc_frame(state: State<'_, EncState>, request: tauri::ipc::Request<'_>) -> Re
         _ => return Err("expected raw frame bytes".into()),
     };
     let id = request.headers().get("x-job").and_then(|v| v.to_str().ok()).unwrap_or("main").to_string();
-    let mut g = state.0.lock().map_err(|e| e.to_string())?;
-    let enc = g.get_mut(&id).ok_or("the encoder is not running")?;
+    // only hold the shared map long enough to find this job's encoder, never while writing
+    let enc = {
+        let g = state.0.lock().map_err(|e| e.to_string())?;
+        let found = g.get(&id).cloned();
+        found.ok_or("the encoder is not running")?
+    };
     let err = enc.err.clone();
-    let si = enc.stdin.as_mut().ok_or("the encoder input is closed")?;
-    si.write_all(data).map_err(|e| {
+    let mut si = enc.stdin.lock().map_err(|e| e.to_string())?;
+    let w = (*si).as_mut().ok_or("the encoder input is closed")?;
+    w.write_all(data).map_err(|e| {
         let m = err.lock().map(|s| s.clone()).unwrap_or_default();
         format!("ffmpeg stopped: {e}. {m}")
     })
@@ -152,23 +192,37 @@ fn enc_frame(state: State<'_, EncState>, request: tauri::ipc::Request<'_>) -> Re
 
 #[tauri::command(async)]
 fn enc_finish(state: State<'_, EncState>, id: String) -> Result<String, String> {
-    let mut enc = {
-        let mut g = state.0.lock().map_err(|e| e.to_string())?;
-        g.remove(&id).ok_or("the encoder is not running")?
+    // the job stays registered until it has finished, so enc_cancel can still stop it while we wait
+    let enc = {
+        let g = state.0.lock().map_err(|e| e.to_string())?;
+        let found = g.get(&id).cloned();
+        found.ok_or("the encoder is not running")?
     };
-    drop(enc.stdin.take());
-    let st = enc.child.wait().map_err(|e| e.to_string())?;
+    if let Ok(mut s) = enc.stdin.lock() { drop(s.take()); } // closing the input tells FFmpeg the frames are done
+    // poll instead of blocking in wait(), so a cancel can kill a stuck FFmpeg while we wait
+    let st = loop {
+        let r = match enc.child.lock() {
+            Ok(mut c) => c.try_wait(),
+            Err(e) => return Err(e.to_string()),
+        };
+        match r {
+            Ok(Some(st)) => break st,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(15)),
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    if let Ok(mut g) = state.0.lock() { g.remove(&id); }
     std::thread::sleep(std::time::Duration::from_millis(40));
-    if st.success() { Ok(enc.out) } else { Err(enc.err.lock().map(|s| s.clone()).unwrap_or_default()) }
+    if st.success() { Ok(enc.out.clone()) } else { Err(enc.err.lock().map(|s| s.clone()).unwrap_or_default()) }
 }
 
 #[tauri::command(async)]
 fn enc_cancel(state: State<'_, EncState>, id: String) -> Result<(), String> {
-    let mut g = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(mut e) = g.remove(&id) {
-        drop(e.stdin.take());
-        let _ = e.child.kill();
-    }
+    let old = {
+        let mut g = state.0.lock().map_err(|e| e.to_string())?;
+        g.remove(&id)
+    };
+    if let Some(e) = old { kill_enc(&e); }
     Ok(())
 }
 

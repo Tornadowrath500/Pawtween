@@ -14,3 +14,10 @@ The web version does not use FFmpeg.
 
 ## Tauri
 Desktop shell: https://tauri.app (MIT / Apache-2.0).
+
+## Bakso Sapi (font, web and desktop versions)
+Display font used for the title and headings (`src/assets/fonts/BaksoSapi.otf`,
+`docs/assets/fonts/BaksoSapi.otf`).
+
+- Designer: Arwan Sutanto, Locomotype (http://locomotype.com), Copyright (c) 2018 Locomotype
+- License note embedded in the font: "a free font for personal and commercial purpose"
